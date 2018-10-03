@@ -10,6 +10,7 @@ import android.widget.Toast
 import io.github.benoitduffez.cupsprint.AppExecutors
 import io.github.benoitduffez.cupsprint.R
 import org.cups4j.CupsClient
+import org.cups4j.CupsPrinter
 import org.cups4j.JobStateEnum
 import org.koin.android.ext.android.inject
 import timber.log.Timber
@@ -22,7 +23,7 @@ import java.net.URI
 import java.net.URISyntaxException
 import java.net.URL
 import java.util.HashMap
-import javax.net.s
+import javax.net.ssl.SSLException
 
 /**
  * When a print job is active, the app will poll the printer to retrieve the job status. This is the polling interval.
@@ -143,12 +144,10 @@ class CupsService : PrintService() {
                 }
             }
         } catch (e: MalformedURLException) {
-            // ToDO: Make a resource for the error message
-            printJob.fail("Couldn't queue print job: $printJob")
+            printJob.fail(getString(R.string.print_job_queue_fail_malformed_url, printJob))
             Timber.e("Couldn't queue print job: $printJob")
         } catch (e: URISyntaxException) {
-            // ToDO: Make a resource for the error message
-            printJob.fail("Couldn't parse URI: $url")
+            printJob.fail(getString(R.string.print_job_queue_fail_uri_syntax, url))
             Timber.e("Couldn't parse URI: $url")
         }
     }
@@ -239,13 +238,24 @@ class CupsService : PrintService() {
                 executors.mainThread.execute { onJobStateUpdate(printJob, jobState) }
             } catch (e: Exception) {
                 executors.mainThread.execute {
+                    jobs.remove(printJob.id)
                     Timber.e("Couldn't get job: $jobId state because: $e")
 
                     when {
                         (e is SocketException || e is SocketTimeoutException)
-                                && e.message?.contains("ECONNRESET") == true -> Toast.makeText(this@CupsService, getString(R.string.err_job_econnreset, jobId), Toast.LENGTH_LONG).show()
-                        e is FileNotFoundException -> Toast.makeText(this@CupsService, getString(R.string.err_job_not_found, jobId), Toast.LENGTH_LONG).show()
-                        else -> Timber.e(e)
+                                && e.message?.contains("ECONNRESET") == true -> {
+                            printJob.fail(getString(R.string.err_job_econnreset, jobId))
+                            Toast.makeText(this@CupsService, getString(R.string.err_job_econnreset, jobId), Toast.LENGTH_LONG).show()
+                        }
+                        e is FileNotFoundException -> {
+                            printJob.fail(getString(R.string.err_job_not_found, jobId))
+                            Toast.makeText(this@CupsService, getString(R.string.err_job_not_found, jobId), Toast.LENGTH_LONG).show()
+                        }
+                        e is NullPointerException -> printJob.complete()
+                        else -> {
+                            printJob.fail(e.localizedMessage)
+                            Timber.e(e)
+                        }
                     }
                 }
             }
@@ -302,11 +312,15 @@ class CupsService : PrintService() {
     @Throws(Exception::class)
     internal fun printDocument(jobId: PrintJobId, clientURL: URL, printerURL: URL, fd: ParcelFileDescriptor) {
         val client = CupsClient(this, clientURL)
-        val printer = client.getPrinter(printerURL) ?: throw NullPrinterException()
+        val printer = client.getPrinter(printerURL)?.let { printer ->
+            val cupsPrinter = CupsPrinter(printerURL, printer.name, true)
+            cupsPrinter.location = printer.location
+            cupsPrinter
+        }
 
         val doc = ParcelFileDescriptor.AutoCloseInputStream(fd)
         val job = org.cups4j.PrintJob.Builder(doc).build()
-        val result = printer.print(job, this)
+        val result = printer?.print(job, this) ?: throw NullPrinterException()
         jobs[jobId] = result.jobId
     }
 
